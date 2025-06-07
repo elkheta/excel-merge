@@ -1,0 +1,38 @@
+{
+  "name": "nzalheart/excel-merge",
+  "license": "MIT",
+  "description": "A PHP library to merge two or more Excel files into one",
+  "autoload": {
+    "psr-4": {
+      "Nzalheart\\ExcelMerge\\": "src/"
+    },
+    "exclude-from-classmap": [
+      "tests/"
+    ]
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Tests\\": "tests/"
+    }
+  },
+
+  "require": {
+    "php": ">=7.4",
+    "ext-dom": "*",
+    "ext-zip": "*",
+    "webmozart/assert": "^1.11"
+  },
+  "require-dev": {
+    "friendsofphp/php-cs-fixer": "^3.9",
+    "phpstan/phpstan": "^1.8",
+    "ergebnis/phpstan-rules": "^1.0",
+    "phpstan/phpstan-webmozart-assert": "^1.2",
+    "phpstan/phpstan-strict-rules": "^1.3",
+    "phpunit/phpunit": "^9.5"
+  },
+  "config": {
+    "allow-plugins": {
+      "infection/extension-installer": false
+    }
+  }
+}

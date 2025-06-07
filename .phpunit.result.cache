@@ -1,0 +1,1 @@
+{"version":1,"defects":{"Tests\\ExcelMerge\\ExcelMergeTest::testFilesAreMergedWithoutExternalLinks":4,"Tests\\ExcelMerge\\ExcelMergeTest::testFilesAreMergedWithExternalLinks":4},"times":{"Tests\\ExcelMerge\\ExcelMergeTest::testFilesAreMergedWithoutExternalLinks":0.05,"Tests\\ExcelMerge\\ExcelMergeTest::testFilesAreMergedWithExternalLinks":0.037}}
