@@ -201,18 +201,11 @@ final class ExcelMerge
                 $worksheets = glob("{$zipDir}/xl/worksheets/sheet*.xml");
                 Assert::isArray($worksheets);
                 foreach ($worksheets as $worksheet) {
-                    list($sheetNumber, $sheetName) = $this->worksheetTask->merge($worksheet, $styles, $conditionalStyles);
-                    $this->workbookRelsTask->set($sheetNumber, $sheetName);
-                    $this->workbookRelsTask->merge();
-
-                    $this->contentTypesTask->set($sheetNumber, $sheetName);
-                    $this->contentTypesTask->merge();
-
-                    $this->appTask->set($sheetNumber, $sheetName);
-                    $this->appTask->merge();
-
-                    $this->workbookTask->set($sheetNumber, $sheetName);
-                    $this->workbookTask->merge();
+                    // Use appendToFirstSheet instead of creating new sheets
+                    list($sheetNumber, $sheetName) = $this->worksheetTask->appendToFirstSheet($worksheet, $styles, $conditionalStyles);
+                    
+                    // No need to update workbook, rels, content types since we're only using sheet1
+                    // The first file already set up all the metadata for sheet1
                 }
             }
         }
