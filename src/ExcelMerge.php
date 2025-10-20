@@ -89,6 +89,8 @@ final class ExcelMerge
 
     public function addFile(string $filename): void
     {
+        // This method is now handled by processFiles() batch processing
+        // Keeping for backward compatibility but no longer used in constructor
         if ($this->isSupportedFile($filename)) {
             if ($this->resultsDirEmpty()) {
                 $this->addFirstFile($filename);
@@ -153,7 +155,8 @@ final class ExcelMerge
 
         // Batch merge remaining files
         if (count($validFiles) > 1) {
-            $this->batchMergeWorksheets(array_slice($validFiles, 1));
+            $remainingFiles = array_slice($validFiles, 1);
+            $this->batchMergeWorksheets($remainingFiles);
         }
     }
 
@@ -212,12 +215,13 @@ final class ExcelMerge
         $allMergeTasks = [];
 
         // Prepare all files
-        foreach ($filenames as $filename) {
+        foreach ($filenames as $index => $filename) {
             if (!$this->isSupportedFile($filename, false)) {
                 continue;
             }
 
-            $zipDir = $this->tmpDir . basename($filename);
+            // Create unique directory for each file to avoid conflicts
+            $zipDir = $this->tmpDir . 'file_' . $index . '_' . basename($filename);
             $this->unzip($filename, $zipDir);
 
             $worksheets = glob("{$zipDir}/xl/worksheets/sheet*.xml");
@@ -246,15 +250,20 @@ final class ExcelMerge
             $this->addFirstFile($filename);
         } else {
             if ($this->isSupportedFile($filename)) {
-                $zipDir = $this->tmpDir . DIRECTORY_SEPARATOR . basename($filename);
+                // Create unique directory to avoid conflicts
+                $zipDir = $this->tmpDir . DIRECTORY_SEPARATOR . 'merge_' . uniqid() . '_' . basename($filename);
                 $this->unzip($filename, $zipDir);
 
                 list($styles, $conditionalStyles) = $this->stylesTask->merge($zipDir);
 
                 $worksheets = glob("{$zipDir}/xl/worksheets/sheet*.xml");
                 Assert::isArray($worksheets);
+                // Only process the first worksheet (sheet1.xml) from each file
                 foreach ($worksheets as $worksheet) {
-                    $this->worksheetTask->appendToFirstSheet($worksheet, $styles, $conditionalStyles);
+                    if (basename($worksheet) === 'sheet1.xml') {
+                        $this->worksheetTask->appendToFirstSheet($worksheet, $styles, $conditionalStyles);
+                        break; // Only process the first sheet from each file
+                    }
                 }
             }
         }

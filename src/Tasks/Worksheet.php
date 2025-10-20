@@ -47,11 +47,19 @@ final class Worksheet extends MergeTask
         }
 
         // Process all files
-        foreach ($mergeTasks as $task) {
+        foreach ($mergeTasks as $taskIndex => $task) {
             list($styles, $conditionalStyles) = $stylesTask->merge($task['zipDir']);
             
+            // Merge shared strings and get mapping
+            $sharedStringsMapping = $this->mergeSharedStrings($task['zipDir']);
+            
+            // Only process the first worksheet (sheet1.xml) from each file
+            // We want to append data from each file's first sheet, not all sheets
             foreach ($task['worksheets'] as $worksheet) {
-                $this->appendToFirstSheetOptimized($worksheet, $styles, $conditionalStyles);
+                if (basename($worksheet) === 'sheet1.xml') {
+                    $this->appendToFirstSheetOptimized($worksheet, $styles, $conditionalStyles, $sharedStringsMapping);
+                    break; // Only process the first sheet from each file
+                }
             }
         }
 
@@ -68,12 +76,75 @@ final class Worksheet extends MergeTask
     }
 
     /**
+     * Merge shared strings from source file into result file
+     */
+    private function mergeSharedStrings(string $zipDir): array
+    {
+        $sourceSharedStringsFile = $zipDir . '/xl/sharedStrings.xml';
+        $resultSharedStringsFile = $this->getResultDir() . '/xl/sharedStrings.xml';
+        
+        if (!file_exists($sourceSharedStringsFile)) {
+            return []; // No shared strings to merge
+        }
+        
+        // Load result shared strings
+        $resultDom = new DOMDocument();
+        $resultDom->load($resultSharedStringsFile);
+        $resultXpath = new DOMXPath($resultDom);
+        $resultXpath->registerNamespace('m', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+        
+        // Load source shared strings  
+        $sourceDom = new DOMDocument();
+        $sourceDom->load($sourceSharedStringsFile);
+        $sourceXpath = new DOMXPath($sourceDom);
+        $sourceXpath->registerNamespace('m', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+        
+        // Get existing strings for deduplication
+        $existingStrings = [];
+        $resultStrings = $resultXpath->query('//m:si');
+        foreach ($resultStrings as $index => $stringNode) {
+            $existingStrings[$stringNode->textContent] = $index;
+        }
+        
+        $mapping = [];
+        $sourceStrings = $sourceXpath->query('//m:si');
+        $sst = $resultXpath->query('//m:sst')->item(0);
+        
+        foreach ($sourceStrings as $sourceIndex => $sourceStringNode) {
+            $stringValue = $sourceStringNode->textContent;
+            
+            if (array_key_exists($stringValue, $existingStrings)) {
+                // String already exists, map to existing index
+                $mapping[$sourceIndex] = $existingStrings[$stringValue];
+            } else {
+                // New string, add it
+                $newIndex = count($existingStrings);
+                $importedNode = $resultDom->importNode($sourceStringNode, true);
+                $sst->appendChild($importedNode);
+                
+                $existingStrings[$stringValue] = $newIndex;
+                $mapping[$sourceIndex] = $newIndex;
+            }
+        }
+        
+        // Update count attribute
+        $sst->setAttribute('count', (string) count($existingStrings));
+        $sst->setAttribute('uniqueCount', (string) count($existingStrings));
+        
+        // Save updated shared strings
+        $resultDom->save($resultSharedStringsFile);
+        
+        return $mapping;
+    }
+
+    /**
      * Optimized append using cached DOM
      */
     private function appendToFirstSheetOptimized(
         string $filename,
         array $stylesMapping,
-        array $conditionalStylesMapping
+        array $conditionalStylesMapping,
+        array $sharedStringsMapping = []
     ): void {
         if (!file_exists($filename)) {
             throw new FileNotFoundException();
@@ -88,6 +159,7 @@ final class Worksheet extends MergeTask
 
         // Get all data rows from source (skip header row 1)
         $sourceRows = $sourceXpath->query('//m:sheetData/m:row');
+        
         
         // Batch import rows
         $rowsToAppend = [];
@@ -105,7 +177,7 @@ final class Worksheet extends MergeTask
             $importedRow->setAttribute('r', (string) $this->cachedLastRowNum);
             
             // Batch process cells
-            $this->updateRowCells($importedRow, $stylesMapping);
+            $this->updateRowCells($importedRow, $stylesMapping, $sharedStringsMapping);
             
             $rowsToAppend[] = $importedRow;
         }
@@ -117,9 +189,9 @@ final class Worksheet extends MergeTask
     }
 
     /**
-     * Update cell references and styles in a row
+     * Update cell references, styles, and shared strings in a row
      */
-    private function updateRowCells(DOMNode $row, array $stylesMapping): void
+    private function updateRowCells(DOMNode $row, array $stylesMapping, array $sharedStringsMapping = []): void
     {
         $rowNum = $row->getAttribute('r');
         $cells = $row->getElementsByTagName('c');
@@ -144,6 +216,20 @@ final class Worksheet extends MergeTask
                 $oldStyleId = (int) $styleId;
                 if (array_key_exists($oldStyleId, $stylesMapping)) {
                     $cell->setAttribute('s', (string) $stylesMapping[$oldStyleId]);
+                }
+            }
+            
+            // Remap shared string references
+            if ($cell->getAttribute('t') === 's' && !empty($sharedStringsMapping)) {
+                $valueNodes = $cell->getElementsByTagName('v');
+                if ($valueNodes->length > 0) {
+                    $valueNode = $valueNodes->item(0);
+                    $oldIndex = (int) $valueNode->textContent;
+                    
+                    if (array_key_exists($oldIndex, $sharedStringsMapping)) {
+                        $newIndex = $sharedStringsMapping[$oldIndex];
+                        $valueNode->textContent = (string) $newIndex;
+                    }
                 }
             }
         }
