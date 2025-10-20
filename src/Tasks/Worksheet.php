@@ -1,18 +1,10 @@
 <?php declare(strict_types=1);
 
-/**
- * This file is part of Marketresponse.
- *
- * Unauthorized copying of this file, via any medium is strictly prohibited.
- *
- * @copyright Copyright (c) 2025 Marketresponse - All Rights Reserved
- * @license   Proprietary and confidential
- */
-
 namespace Nzalheart\ExcelMerge\Tasks;
 
 use DOMDocument;
 use DOMXPath;
+use DOMNode;
 use Symfony\Component\Filesystem\Exception\FileNotFoundException;
 
 use function array_key_exists;
@@ -21,6 +13,168 @@ use function dirname;
 
 final class Worksheet extends MergeTask
 {
+    private ?DOMDocument $cachedFirstSheet = null;
+    private ?DOMXPath $cachedFirstXpath = null;
+    private ?DOMNode $cachedFirstSheetData = null;
+    private int $cachedLastRowNum = 0;
+
+    /**
+     * Batch process multiple worksheets efficiently
+     *
+     * @param array $mergeTasks Array of merge task data
+     * @param Styles $stylesTask
+     */
+    public function batchAppendToFirstSheet(array $mergeTasks, Styles $stylesTask): void
+    {
+        // Load destination sheet once
+        $firstSheetFile = $this->getResultDir() . "/xl/worksheets/sheet1.xml";
+        $this->cachedFirstSheet = new DOMDocument();
+        $this->cachedFirstSheet->load($firstSheetFile);
+        
+        $this->cachedFirstXpath = new DOMXPath($this->cachedFirstSheet);
+        $this->cachedFirstXpath->registerNamespace('m', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+        
+        $this->cachedFirstSheetData = $this->cachedFirstXpath->query('//m:sheetData')->item(0);
+        
+        // Calculate initial last row
+        $firstSheetRows = $this->cachedFirstXpath->query('//m:sheetData/m:row');
+        $this->cachedLastRowNum = 0;
+        foreach ($firstSheetRows as $row) {
+            $rowNum = (int) $row->getAttribute('r');
+            if ($rowNum > $this->cachedLastRowNum) {
+                $this->cachedLastRowNum = $rowNum;
+            }
+        }
+
+        // Process all files
+        foreach ($mergeTasks as $task) {
+            list($styles, $conditionalStyles) = $stylesTask->merge($task['zipDir']);
+            
+            foreach ($task['worksheets'] as $worksheet) {
+                $this->appendToFirstSheetOptimized($worksheet, $styles, $conditionalStyles);
+            }
+        }
+
+        // Update dimension once at the end
+        $this->updateDimension();
+        
+        // Save once
+        $this->cachedFirstSheet->save($firstSheetFile);
+        
+        // Clear cache
+        $this->cachedFirstSheet = null;
+        $this->cachedFirstXpath = null;
+        $this->cachedFirstSheetData = null;
+    }
+
+    /**
+     * Optimized append using cached DOM
+     */
+    private function appendToFirstSheetOptimized(
+        string $filename,
+        array $stylesMapping,
+        array $conditionalStylesMapping
+    ): void {
+        if (!file_exists($filename)) {
+            throw new FileNotFoundException();
+        }
+
+        // Load source sheet
+        $sourceSheet = new DOMDocument();
+        $sourceSheet->load($filename);
+        
+        $sourceXpath = new DOMXPath($sourceSheet);
+        $sourceXpath->registerNamespace('m', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+
+        // Get all data rows from source (skip header row 1)
+        $sourceRows = $sourceXpath->query('//m:sheetData/m:row');
+        
+        // Batch import rows
+        $rowsToAppend = [];
+        foreach ($sourceRows as $sourceRow) {
+            $sourceRowNum = (int) $sourceRow->getAttribute('r');
+            
+            if ($sourceRowNum <= 1) {
+                continue;
+            }
+            
+            $this->cachedLastRowNum++;
+            
+            // Import the row
+            $importedRow = $this->cachedFirstSheet->importNode($sourceRow, true);
+            $importedRow->setAttribute('r', (string) $this->cachedLastRowNum);
+            
+            // Batch process cells
+            $this->updateRowCells($importedRow, $stylesMapping);
+            
+            $rowsToAppend[] = $importedRow;
+        }
+
+        // Append all rows at once
+        foreach ($rowsToAppend as $row) {
+            $this->cachedFirstSheetData->appendChild($row);
+        }
+    }
+
+    /**
+     * Update cell references and styles in a row
+     */
+    private function updateRowCells(DOMNode $row, array $stylesMapping): void
+    {
+        $rowNum = $row->getAttribute('r');
+        $cells = $row->getElementsByTagName('c');
+        
+        // Process cells in reverse to avoid live NodeList issues
+        $cellArray = [];
+        foreach ($cells as $cell) {
+            $cellArray[] = $cell;
+        }
+        
+        foreach ($cellArray as $cell) {
+            $oldRef = $cell->getAttribute('r');
+            
+            // Update cell reference
+            if (preg_match('/^([A-Z]+)\d+$/', $oldRef, $matches)) {
+                $cell->setAttribute('r', $matches[1] . $rowNum);
+            }
+            
+            // Remap style
+            $styleId = $cell->getAttribute('s');
+            if ($styleId !== '' && is_numeric($styleId)) {
+                $oldStyleId = (int) $styleId;
+                if (array_key_exists($oldStyleId, $stylesMapping)) {
+                    $cell->setAttribute('s', (string) $stylesMapping[$oldStyleId]);
+                }
+            }
+        }
+    }
+
+    /**
+     * Update dimension at the end
+     */
+    private function updateDimension(): void
+    {
+        $dimensionNodes = $this->cachedFirstXpath->query('//m:dimension');
+        if ($dimensionNodes->length > 0) {
+            $dimensionNode = $dimensionNodes->item(0);
+            
+            // Find highest column efficiently
+            $allCells = $this->cachedFirstXpath->query('//m:sheetData/m:row/m:c');
+            $highestCol = 'A';
+            
+            foreach ($allCells as $cell) {
+                $cellRef = $cell->getAttribute('r');
+                if (preg_match('/^([A-Z]+)\d+$/', $cellRef, $matches)) {
+                    if ($matches[1] > $highestCol) {
+                        $highestCol = $matches[1];
+                    }
+                }
+            }
+            
+            $dimensionNode->setAttribute('ref', "A1:{$highestCol}{$this->cachedLastRowNum}");
+        }
+    }
+
     /**
      * Appends worksheet data to the first sheet instead of creating new sheets
      *
@@ -263,7 +417,6 @@ final class Worksheet extends MergeTask
 
         $sheetName = "Worksheet $number";
         $elems = $xpath->query("//m:sheets/m:sheet[@sheetId='" . $number . "']");
-        //		$elems = $xpath->query("//m:sheets/m:sheet[@sheetId='" . $sheetNumber . "']");
         if (false != $elems) {
             foreach ($elems as $e) {
                 // should be one only

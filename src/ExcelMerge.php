@@ -33,7 +33,7 @@ final class ExcelMerge
     public bool $debug = false;
 
     /** @var array<string> */
-    private array $files;
+    private array $files = [];
 
     private string $workingDir;
 
@@ -59,9 +59,8 @@ final class ExcelMerge
         $this->initializeDirectories();
         $this->registerMergeTasks();
 
-        foreach ($files as $file) {
-            $this->addFile($file);
-        }
+        // Batch process all files at once
+        $this->processFiles($files);
     }
 
     public function __destruct()
@@ -80,7 +79,7 @@ final class ExcelMerge
 
     public function getWorkingDir(): string
     {
-        return $this->getWorkingDir();
+        return $this->workingDir;
     }
 
     public function getTmpDir(): string
@@ -117,8 +116,6 @@ final class ExcelMerge
     {
         $zipfile = $this->zipContents();
 
-        // ignore whatever extension the user might have given us and use the one
-        // we obtained in 'zipContents' (i.e. either XLSX or XLSM)
         $downloadFilename =
             pathinfo($downloadFilename, PATHINFO_FILENAME) . '.' .
             pathinfo($zipfile, PATHINFO_EXTENSION);
@@ -135,6 +132,29 @@ final class ExcelMerge
     public function getFiles(): array
     {
         return $this->files;
+    }
+
+    private function processFiles(array $files): void
+    {
+        $validFiles = [];
+        foreach ($files as $file) {
+            if ($this->isSupportedFile($file, false)) {
+                $validFiles[] = $file;
+            }
+        }
+
+        if (empty($validFiles)) {
+            return;
+        }
+
+        // Add first file
+        $this->addFirstFile($validFiles[0]);
+        $this->files[] = $validFiles[0];
+
+        // Batch merge remaining files
+        if (count($validFiles) > 1) {
+            $this->batchMergeWorksheets(array_slice($validFiles, 1));
+        }
     }
 
     private function initializeDirectories(): void
@@ -178,13 +198,46 @@ final class ExcelMerge
 
     private function addFirstFile(string $filename): void
     {
-        if ($this->resultsDirEmpty()) {
-            if ($this->isSupportedFile($filename)) {
-                $this->unzip($filename, $this->resultDir);
-            }
-        } else {
-            $this->mergeWorksheets($filename);
+        if ($this->isSupportedFile($filename)) {
+            $this->unzip($filename, $this->resultDir);
         }
+    }
+
+    private function batchMergeWorksheets(array $filenames): void
+    {
+        if (empty($filenames)) {
+            return;
+        }
+
+        $allMergeTasks = [];
+
+        // Prepare all files
+        foreach ($filenames as $filename) {
+            if (!$this->isSupportedFile($filename, false)) {
+                continue;
+            }
+
+            $zipDir = $this->tmpDir . basename($filename);
+            $this->unzip($filename, $zipDir);
+
+            $worksheets = glob("{$zipDir}/xl/worksheets/sheet*.xml");
+            Assert::isArray($worksheets);
+
+            $allMergeTasks[] = [
+                'zipDir' => $zipDir,
+                'worksheets' => $worksheets,
+                'filename' => $filename
+            ];
+
+            $this->files[] = $filename;
+        }
+
+        if (empty($allMergeTasks)) {
+            return;
+        }
+
+        // Process all files in batch using the optimized method
+        $this->worksheetTask->batchAppendToFirstSheet($allMergeTasks, $this->stylesTask);
     }
 
     private function mergeWorksheets(string $filename): void
@@ -201,11 +254,7 @@ final class ExcelMerge
                 $worksheets = glob("{$zipDir}/xl/worksheets/sheet*.xml");
                 Assert::isArray($worksheets);
                 foreach ($worksheets as $worksheet) {
-                    // Use appendToFirstSheet instead of creating new sheets
-                    list($sheetNumber, $sheetName) = $this->worksheetTask->appendToFirstSheet($worksheet, $styles, $conditionalStyles);
-                    
-                    // No need to update workbook, rels, content types since we're only using sheet1
-                    // The first file already set up all the metadata for sheet1
+                    $this->worksheetTask->appendToFirstSheet($worksheet, $styles, $conditionalStyles);
                 }
             }
         }
@@ -214,8 +263,6 @@ final class ExcelMerge
     private function registerMergeTasks(): void
     {
         $this->stylesTask = new Styles($this);
-
-        // worksheet tasks
         $this->worksheetTask = new Worksheet($this);
         $this->workbookRelsTask = new WorkbookRels($this);
         $this->contentTypesTask = new ContentTypes($this);
@@ -290,7 +337,6 @@ final class ExcelMerge
         $zip = new ZipArchive();
         $zip->open($targetZip, ZipArchive::CREATE | ZipArchive::OVERWRITE);
 
-        // Create recursive directory iterator
         /** @var SplFileInfo[] $files */
         $files = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($zipDirectory),
@@ -298,32 +344,24 @@ final class ExcelMerge
         );
 
         foreach ($files as $name => $file) {
-            // Skip directories (they would be added automatically)
             if (!$file->isDir()) {
-                // Get real and relative path for current file
                 $filePath = $file->getRealPath();
                 if (basename($filePath) != $targetZip) {
                     $relativePath = mb_substr($filePath, mb_strlen($zipDirectory) + 1);
-
-                    // Add current file to archive
                     $zip->addFile($filePath, $relativePath);
-
                     $delete[] = $filePath;
                 }
             }
         }
 
-        // Zip archive will be created only after closing object
         $zip->close();
 
-        // by default, we delete the files that we put in the zip file
         if (!$this->debug) {
             foreach ($delete as $d) {
                 unlink($d);
             }
         }
 
-        // give the zipfile its final name
         rename($targetZip, "$targetZip.$ext");
 
         return "$targetZip.$ext";
